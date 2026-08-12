@@ -1,0 +1,38 @@
+{
+  "name": "log-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Structured log ingestion, query and retention service backed by PostgreSQL",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "fastify": "^5.11.3",
+    "pg": "^8.23.0",
+    "pg-copy-streams": "^7.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.21.0",
+    "@types/pg-copy-streams": "^1.2.5",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "undici": "^8.10.0",
+    "vitest": "^4.1.10"
+  }
+}
