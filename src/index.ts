@@ -2,6 +2,7 @@ import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { createPool } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
+import { createLogsRepository } from './db/logs-repository.js';
 import { createServer } from './http/server.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -12,7 +13,8 @@ async function main(): Promise<void> {
   const pool = createPool(config.database);
 
   let ready = false;
-  const app = createServer({ config, readiness: { isReady: () => ready } });
+  const logs = createLogsRepository(pool);
+  const app = createServer({ config, readiness: { isReady: () => ready }, logs });
 
   // Listen before migrating so health checks get a 503 rather than a refused connection.
   await app.listen({ host: config.host, port: config.port });

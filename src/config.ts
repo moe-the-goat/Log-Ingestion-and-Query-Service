@@ -12,6 +12,7 @@ export interface Config {
   host: string;
   port: number;
   logLevel: LogLevel;
+  maxBodyBytes: number;
   database: DatabaseConfig;
 }
 
@@ -50,6 +51,8 @@ export function loadConfig(env: Env = process.env): Config {
     host: str(env, 'HOST', '0.0.0.0'),
     port: int(env, 'PORT', 8080, 1, 65535),
     logLevel: oneOf(env, 'LOG_LEVEL', 'info', ['debug', 'info', 'warn', 'error'] as const),
+    // Ingest batches are far larger than Fastify's 1 MB default, which would reject them outright.
+    maxBodyBytes: int(env, 'HTTP_MAX_BODY_BYTES', 4 * 1024 * 1024, 1024, 64 * 1024 * 1024),
     database: {
       url: str(env, 'DATABASE_URL', 'postgres://logs:logs@localhost:5432/logs'),
       poolSize: int(env, 'DATABASE_POOL_SIZE', 8, 1, 64),
