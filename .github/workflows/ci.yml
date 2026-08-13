@@ -20,3 +20,32 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
+      - run: npm run test:unit
+
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: logs
+          POSTGRES_PASSWORD: logs
+          POSTGRES_DB: logs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U logs -d logs"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration
+        env:
+          DATABASE_URL: postgres://logs:logs@localhost:5432/logs
