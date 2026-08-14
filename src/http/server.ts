@@ -5,6 +5,7 @@ import type { LogsRepository } from '../db/logs-repository.js';
 import { registerHealthRoute } from './routes/health.js';
 import type { Readiness } from './routes/health.js';
 import { registerLogsRoutes } from './routes/logs.js';
+import { registerLogsQueryRoutes } from './routes/logs-query.js';
 
 export interface ServerDeps {
   config: Config;
@@ -32,6 +33,7 @@ export function createServer(deps: ServerDeps): FastifyInstance {
 
   registerHealthRoute(app, deps.readiness);
   registerLogsRoutes(app, deps.logs);
+  registerLogsQueryRoutes(app, deps.logs);
 
   return app;
 }
