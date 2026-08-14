@@ -1,6 +1,9 @@
 import type { Pool } from 'pg';
-import type { LogRecord } from '../domain/log.js';
+import type { Attributes, LogRecord } from '../domain/log.js';
 import { nextId } from '../domain/id.js';
+import type { AggregateQuery, BucketSize, GroupBy, LogQuery } from '../domain/query.js';
+import type { Cursor } from '../domain/cursor.js';
+import { buildWhere } from './log-filters.js';
 
 const COLUMNS = 6;
 
@@ -9,8 +12,48 @@ const MAX_ROWS_PER_STATEMENT = 1000;
 
 const statements = new Map<number, string>();
 
+// Postgres renders timestamptz in its own style, so the API format is produced in SQL rather
+// than reparsed into a Date on the way out.
+const TIMESTAMP_FORMAT = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
+const BUCKET_FORMAT = `'YYYY-MM-DD"T"HH24:MI:SS"Z"'`;
+
+// Identifiers and intervals can never be parameters, so both come from fixed allowlists.
+const BUCKET_INTERVALS: Record<BucketSize, string> = {
+  '1m': '1 minute',
+  '5m': '5 minutes',
+  '1h': '1 hour',
+  '1d': '1 day',
+};
+
+const GROUP_EXPRESSIONS: Record<GroupBy, string> = {
+  service: 'service',
+  level: 'level::text',
+};
+
+export interface StoredLog {
+  id: string;
+  timestamp: string;
+  level: string;
+  service: string;
+  message: string;
+  attributes: Attributes;
+}
+
+export interface SearchResult {
+  logs: StoredLog[];
+  nextCursor: Cursor | null;
+}
+
+export interface AggregateBucket {
+  start: string;
+  group: string | null;
+  count: number;
+}
+
 export interface LogsRepository {
   insert(records: readonly LogRecord[]): Promise<void>;
+  search(query: LogQuery): Promise<SearchResult>;
+  aggregate(query: AggregateQuery): Promise<AggregateBucket[]>;
 }
 
 function insertStatement(rows: number): string {
@@ -65,6 +108,80 @@ export function createLogsRepository(pool: Pool): LogsRepository {
       } finally {
         client.release();
       }
+    },
+
+    // One row past the limit is read so next_cursor can be null exactly when nothing follows,
+    // instead of handing back a cursor that leads to an empty page.
+    async search(query: LogQuery): Promise<SearchResult> {
+      const where = buildWhere(query.filters);
+      const conditions = [where.text];
+      const values = [...where.values];
+      let index = values.length + 1;
+
+      if (query.cursor !== undefined) {
+        conditions.push(`(ts, id) < ($${index++}::timestamptz, $${index++}::bigint)`);
+        values.push(new Date(query.cursor.timestampMs).toISOString(), query.cursor.id);
+      }
+
+      values.push(query.limit + 1);
+
+      const result = await pool.query<StoredLog>(
+        `SELECT id::text AS id,
+                to_char(ts AT TIME ZONE 'UTC', ${TIMESTAMP_FORMAT}) AS timestamp,
+                level::text AS level,
+                service,
+                message,
+                attributes
+           FROM logs
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY ts DESC, id DESC
+          LIMIT $${index}`,
+        values,
+      );
+
+      const hasMore = result.rows.length > query.limit;
+      const logs = hasMore ? result.rows.slice(0, query.limit) : result.rows;
+      const last = logs[logs.length - 1];
+
+      return {
+        logs,
+        nextCursor:
+          hasMore && last !== undefined
+            ? { timestampMs: Date.parse(last.timestamp), id: last.id }
+            : null,
+      };
+    },
+
+    async aggregate(query: AggregateQuery): Promise<AggregateBucket[]> {
+      const where = buildWhere(query.filters);
+      const values = [...where.values];
+      const intervalIndex = values.length + 1;
+      values.push(BUCKET_INTERVALS[query.bucket]);
+
+      const groupExpression =
+        query.groupBy === undefined ? 'NULL::text' : GROUP_EXPRESSIONS[query.groupBy];
+
+      const result = await pool.query<{ start: string; group: string | null; count: string }>(
+        `SELECT to_char(bucket AT TIME ZONE 'UTC', ${BUCKET_FORMAT}) AS start,
+                group_value AS "group",
+                count
+           FROM (
+                SELECT date_bin($${intervalIndex}::interval, ts, TIMESTAMPTZ '2000-01-01') AS bucket,
+                       ${groupExpression} AS group_value,
+                       count(*) AS count
+                  FROM logs
+                 WHERE ${where.text}
+                 GROUP BY 1, 2
+                ) buckets
+          ORDER BY bucket ASC, group_value ASC NULLS FIRST`,
+        values,
+      );
+
+      return result.rows.map((row) => ({
+        start: row.start,
+        group: row.group,
+        count: Number(row.count),
+      }));
     },
   };
 }

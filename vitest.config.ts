@@ -5,5 +5,7 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     environment: 'node',
     testTimeout: 30_000,
+    // Integration files share one database and truncate between tests, so they cannot overlap.
+    fileParallelism: false,
   },
 });
