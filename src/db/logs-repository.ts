@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import type { Attributes, LogRecord } from '../domain/log.js';
-import { nextId } from '../domain/id.js';
+import { idToString, nextId } from '../domain/id.js';
 import type { AggregateQuery, BucketSize, GroupBy, LogQuery } from '../domain/query.js';
 import type { Cursor } from '../domain/cursor.js';
 import { buildWhere } from './log-filters.js';
@@ -76,7 +76,7 @@ function parameters(records: readonly LogRecord[]): unknown[] {
   let at = 0;
 
   for (const record of records) {
-    values[at++] = nextId();
+    values[at++] = idToString(nextId());
     values[at++] = new Date(record.timestampMs).toISOString();
     values[at++] = record.level;
     values[at++] = record.service;
