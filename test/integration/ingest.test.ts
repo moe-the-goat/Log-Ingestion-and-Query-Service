@@ -6,6 +6,9 @@ import { createLogger } from '../../src/logger.js';
 import { createPool } from '../../src/db/pool.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createLogsRepository } from '../../src/db/logs-repository.js';
+import { createLogWriter } from '../../src/db/log-writer.js';
+import { createWriteBuffer } from '../../src/ingest/write-buffer.js';
+import type { WriteBuffer } from '../../src/ingest/write-buffer.js';
 import { createServer } from '../../src/http/server.js';
 
 const valid = {
@@ -27,21 +30,28 @@ function post(app: FastifyInstance, payload: unknown) {
 describe('POST /logs', () => {
   let pool: Pool;
   let app: FastifyInstance;
+  let ingest: WriteBuffer;
 
   beforeAll(async () => {
     const config = loadConfig();
     pool = createPool(config.database);
     await runMigrations(pool, createLogger('error'));
+
+    const writer = await createLogWriter(pool, config.ingest.writer);
+    ingest = createWriteBuffer(writer, config.ingest, createLogger('error'));
+
     app = createServer({
       config,
       readiness: { isReady: () => true },
       logs: createLogsRepository(pool),
+      ingest,
     });
     await app.ready();
   });
 
   afterAll(async () => {
     await app.close();
+    await ingest.close();
     await pool.end();
   });
 

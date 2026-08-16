@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import type { FastifyError, FastifyInstance } from 'fastify';
 import type { Config } from '../config.js';
 import type { LogsRepository } from '../db/logs-repository.js';
+import type { WriteBuffer } from '../ingest/write-buffer.js';
 import { registerHealthRoute } from './routes/health.js';
 import type { Readiness } from './routes/health.js';
 import { registerLogsRoutes } from './routes/logs.js';
@@ -11,6 +12,7 @@ export interface ServerDeps {
   config: Config;
   readiness: Readiness;
   logs: LogsRepository;
+  ingest: WriteBuffer;
 }
 
 export function createServer(deps: ServerDeps): FastifyInstance {
@@ -32,7 +34,7 @@ export function createServer(deps: ServerDeps): FastifyInstance {
   });
 
   registerHealthRoute(app, deps.readiness);
-  registerLogsRoutes(app, deps.logs);
+  registerLogsRoutes(app, deps.ingest);
   registerLogsQueryRoutes(app, deps.logs);
 
   return app;

@@ -1,10 +1,20 @@
 import type { LogLevel } from './logger.js';
+import { WRITER_KINDS } from './db/log-writer.js';
+import type { WriterKind } from './db/log-writer.js';
 
 export interface DatabaseConfig {
   url: string;
   poolSize: number;
   connectionTimeoutMs: number;
   statementTimeoutMs: number;
+}
+
+export interface IngestConfig {
+  writer: WriterKind;
+  flushIntervalMs: number;
+  flushMaxBytes: number;
+  queueMaxBytes: number;
+  maxConcurrentFlushes: number;
 }
 
 export interface Config {
@@ -14,6 +24,7 @@ export interface Config {
   logLevel: LogLevel;
   maxBodyBytes: number;
   database: DatabaseConfig;
+  ingest: IngestConfig;
 }
 
 class ConfigError extends Error {}
@@ -58,6 +69,14 @@ export function loadConfig(env: Env = process.env): Config {
       poolSize: int(env, 'DATABASE_POOL_SIZE', 8, 1, 64),
       connectionTimeoutMs: int(env, 'DATABASE_CONNECTION_TIMEOUT_MS', 10_000, 100, 120_000),
       statementTimeoutMs: int(env, 'DATABASE_STATEMENT_TIMEOUT_MS', 30_000, 100, 600_000),
+    },
+    ingest: {
+      writer: oneOf(env, 'INGEST_WRITER', 'binary', WRITER_KINDS),
+      flushIntervalMs: int(env, 'INGEST_FLUSH_INTERVAL_MS', 50, 1, 5_000),
+      flushMaxBytes: int(env, 'INGEST_FLUSH_MAX_BYTES', 8 * 1024 * 1024, 1024, 128 * 1024 * 1024),
+      // Sized against the 256 MB container so a backlog sheds load instead of ending in an OOM.
+      queueMaxBytes: int(env, 'INGEST_QUEUE_MAX_BYTES', 64 * 1024 * 1024, 1024, 192 * 1024 * 1024),
+      maxConcurrentFlushes: int(env, 'INGEST_MAX_CONCURRENT_FLUSHES', 4, 1, 32),
     },
   };
 }

@@ -3,6 +3,8 @@ import { createLogger } from './logger.js';
 import { createPool } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
 import { createLogsRepository } from './db/logs-repository.js';
+import { createLogWriter } from './db/log-writer.js';
+import { createWriteBuffer } from './ingest/write-buffer.js';
 import { createServer } from './http/server.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -12,9 +14,12 @@ async function main(): Promise<void> {
   const logger = createLogger(config.logLevel);
   const pool = createPool(config.database);
 
+  const writer = await createLogWriter(pool, config.ingest.writer);
+  const ingest = createWriteBuffer(writer, config.ingest, logger);
+
   let ready = false;
   const logs = createLogsRepository(pool);
-  const app = createServer({ config, readiness: { isReady: () => ready }, logs });
+  const app = createServer({ config, readiness: { isReady: () => ready }, logs, ingest });
 
   // Listen before migrating so health checks get a 503 rather than a refused connection.
   await app.listen({ host: config.host, port: config.port });
@@ -22,7 +27,7 @@ async function main(): Promise<void> {
 
   await runMigrations(pool, logger);
   ready = true;
-  logger.info('service ready');
+  logger.info('service ready', { writer: config.ingest.writer });
 
   let stopping = false;
   const shutdown = (signal: string): void => {
@@ -36,7 +41,9 @@ async function main(): Promise<void> {
 
     void (async () => {
       try {
+        // Stop taking requests first, then let everything already acknowledged reach disk.
         await app.close();
+        await ingest.close();
         await pool.end();
         process.exit(0);
       } catch (error) {
