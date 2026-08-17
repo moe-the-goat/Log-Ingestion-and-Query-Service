@@ -108,9 +108,76 @@ Two things are missing at this point in the build, both deliberate:
 to prune, and the per-minute rollup replaces the scan entirely for queries with no `attr.*` or `q`
 filter. Both land next, and this measurement is the baseline they are judged against.
 
+## After partitions, indexes and rollups
+
+The same aggregation, re-measured on **1,204,000 rows across 30 days**, again at one request per
+second while ingestion ran against the same database.
+
+| Measure               | Before  | After       |
+| --------------------- | ------- | ----------- |
+| Aggregation p50       | 0.593 s | **0.054 s** |
+| Aggregation p95       | 0.997 s | **0.084 s** |
+| Aggregation p99       | 1.258 s | **0.088 s** |
+| Aggregation max       | 2.331 s | **0.093 s** |
+| Blocks read per query | 64,543  | 2,170       |
+
+p95 improves roughly twelvefold and the whole distribution collapses: the worst request is now
+faster than the old median. Ingestion during the same window held **29,505 logs/s with 0 shed and
+0 errors**.
+
+The plan shows why — the request never touches the base table:
+
+```
+HashAggregate (actual rows=4182)
+  Buffers: shared hit=2170
+  ->  Seq Scan on log_rollup_1m  (actual rows=248445)
+```
+
+Partition pruning and the new indexes show up on the row-level paths. A service filter over the
+last day reads two partitions out of 35, by index, and stops at the limit:
+
+```
+Limit (actual rows=100)
+  ->  Merge Append
+        ->  Index Only Scan using logs_2026_08_16_service_ts_id_idx (actual rows=1)
+        ->  Index Only Scan using logs_2026_08_17_service_ts_id_idx (actual rows=100)
+```
+
+The rollup costs 30 MB and 248,445 rows against 908 MB of base data — about 3% overhead for the
+query it removes.
+
+### The cost of the indexes
+
+Indexes are not free on the write path, and this is the trade the project actually made:
+
+| Configuration                                        | Logs/s     |
+| ---------------------------------------------------- | ---------- |
+| No indexes, no rollup, no partitions (Day 4)         | 48,846     |
+| GIN + two btree indexes + rollup, current timestamps | **29,505** |
+| Same, timestamps spread over 30 days                 | **15,580** |
+
+Adding the attribute GIN index, two btree indexes and the rollup upsert costs about 40% of peak
+ingest throughput. That was the risk flagged before any of it was written, and the measurement
+confirms it is real but affordable: 29,505/s is still just under twice the 15,000/s target.
+
+The spread case is the honest worst case. Writing timestamps scattered over 30 days touches 30
+partitions and 30 days of index pages at random instead of appending to today's, and produces one
+rollup group per minute rather than a handful. It still clears the target at 15,580/s. Real
+ingestion is overwhelmingly current-timestamped, which is the 29,505/s row.
+
+### A deadlock found by measuring
+
+The first run after adding rollups collapsed to 2,097 logs/s with 177 requests returning 500. The
+cause was `deadlock detected`: concurrent flushes upserted the same rollup rows in whatever order
+each batch happened to produce, so two transactions could take the same two rows in opposite
+orders. It surfaced only once timestamps were spread over many minutes, which is exactly the shape
+a backfill has.
+
+The fix is to sort every rollup group by `(bucket, service, level)` before the upsert, so all
+flushes take row locks in the same order. Large flushes are also split so no statement exceeds the
+65,535 parameter limit. After the fix: 0 deadlocks, 0 errors across every subsequent run.
+
 ## What is not yet measured
 
-- Aggregation with indexes, partitions and rollups in place.
-- Attribute-filtered queries and their GIN write amplification, which is the most likely ceiling
-  on ingest once the attribute index exists.
-- Retention: dropping an expired partition.
+- Retention: dropping an expired partition under load.
+- Attribute-filtered aggregation, which falls back to the base table by design.
