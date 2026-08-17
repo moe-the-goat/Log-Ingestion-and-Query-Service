@@ -5,3 +5,7 @@ coverage/
 .env
 .env.local
 .DS_Store
+benchmark-report.json
+
+# Written by the benchmark CLI while it runs
+.load-generator.compose.override.yml
