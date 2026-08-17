@@ -3,7 +3,8 @@ import type { Attributes, LogRecord } from '../domain/log.js';
 import { idToString, nextId } from '../domain/id.js';
 import type { AggregateQuery, BucketSize, GroupBy, LogQuery } from '../domain/query.js';
 import type { Cursor } from '../domain/cursor.js';
-import { buildWhere } from './log-filters.js';
+import { buildRollupWhere, buildWhere, canUseRollup } from './log-filters.js';
+import { buildRollupStatements } from './rollup.js';
 
 const COLUMNS = 6;
 
@@ -12,8 +13,7 @@ const MAX_ROWS_PER_STATEMENT = 1000;
 
 const statements = new Map<number, string>();
 
-// Postgres renders timestamptz in its own style, so the API format is produced in SQL rather
-// than reparsed into a Date on the way out.
+// The API timestamp format is produced in SQL rather than reparsed into a Date on the way out.
 const TIMESTAMP_FORMAT = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
 const BUCKET_FORMAT = `'YYYY-MM-DD"T"HH24:MI:SS"Z"'`;
 
@@ -89,8 +89,7 @@ function parameters(records: readonly LogRecord[]): unknown[] {
 
 export function createLogsRepository(pool: Pool): LogsRepository {
   return {
-    // One transaction per batch: the caller is told the batch was accepted only once all of
-    // it is committed.
+    // One transaction per batch: accepted is only reported once all of it is committed.
     async insert(records: readonly LogRecord[]): Promise<void> {
       if (records.length === 0) return;
 
@@ -101,6 +100,12 @@ export function createLogsRepository(pool: Pool): LogsRepository {
           const chunk = records.slice(start, start + MAX_ROWS_PER_STATEMENT);
           await client.query(insertStatement(chunk.length), parameters(chunk));
         }
+
+        // Both write paths maintain the rollup identically, so the choice cannot change results.
+        for (const rollup of buildRollupStatements(records)) {
+          await client.query(rollup.text, rollup.values);
+        }
+
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined);
@@ -110,8 +115,7 @@ export function createLogsRepository(pool: Pool): LogsRepository {
       }
     },
 
-    // One row past the limit is read so next_cursor can be null exactly when nothing follows,
-    // instead of handing back a cursor that leads to an empty page.
+    // Reads one row past the limit so next_cursor is null exactly when nothing follows.
     async search(query: LogQuery): Promise<SearchResult> {
       const where = buildWhere(query.filters);
       const conditions = [where.text];
@@ -152,8 +156,10 @@ export function createLogsRepository(pool: Pool): LogsRepository {
       };
     },
 
+    // Uses the rollup when it can answer the request, the base table otherwise; counts match.
     async aggregate(query: AggregateQuery): Promise<AggregateBucket[]> {
-      const where = buildWhere(query.filters);
+      const useRollup = canUseRollup(query.filters);
+      const where = useRollup ? buildRollupWhere(query.filters) : buildWhere(query.filters);
       const values = [...where.values];
       const intervalIndex = values.length + 1;
       values.push(BUCKET_INTERVALS[query.bucket]);
@@ -161,18 +167,25 @@ export function createLogsRepository(pool: Pool): LogsRepository {
       const groupExpression =
         query.groupBy === undefined ? 'NULL::text' : GROUP_EXPRESSIONS[query.groupBy];
 
+      const source = useRollup
+        ? `SELECT date_bin($${intervalIndex}::interval, bucket, TIMESTAMPTZ '2000-01-01') AS bucket,
+                  ${groupExpression} AS group_value,
+                  sum(count) AS count
+             FROM log_rollup_1m
+            WHERE ${where.text}
+            GROUP BY 1, 2`
+        : `SELECT date_bin($${intervalIndex}::interval, ts, TIMESTAMPTZ '2000-01-01') AS bucket,
+                  ${groupExpression} AS group_value,
+                  count(*) AS count
+             FROM logs
+            WHERE ${where.text}
+            GROUP BY 1, 2`;
+
       const result = await pool.query<{ start: string; group: string | null; count: string }>(
         `SELECT to_char(bucket AT TIME ZONE 'UTC', ${BUCKET_FORMAT}) AS start,
                 group_value AS "group",
                 count
-           FROM (
-                SELECT date_bin($${intervalIndex}::interval, ts, TIMESTAMPTZ '2000-01-01') AS bucket,
-                       ${groupExpression} AS group_value,
-                       count(*) AS count
-                  FROM logs
-                 WHERE ${where.text}
-                 GROUP BY 1, 2
-                ) buckets
+           FROM (${source}) buckets
           ORDER BY bucket ASC, group_value ASC NULLS FIRST`,
         values,
       );

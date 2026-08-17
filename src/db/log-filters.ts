@@ -7,15 +7,12 @@ export interface SqlFragment {
   values: unknown[];
 }
 
-// Turns a user-supplied value into a LIKE pattern that matches it literally, so % and _ in a
-// search term stay characters instead of becoming wildcards.
+// Escapes the pattern so % and _ in a search term stay characters instead of wildcards.
 function likePattern(value: string): string {
   return `%${value.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
 }
 
-// Attributes keep their original JSON types, so an attr filter has to match both the text form
-// and, when the value looks like one, the number or boolean form. Both arms are containment
-// checks, so both can use the GIN index.
+// Attributes keep their JSON types, so a filter matches the text form and the native one.
 function containmentVariants(key: string, value: string): string[] {
   const variants = [JSON.stringify({ [key]: value })];
 
@@ -31,8 +28,7 @@ function containmentVariants(key: string, value: string): string[] {
   return variants;
 }
 
-// Every user value becomes a placeholder and every attribute key travels inside a jsonb
-// parameter, so no caller-supplied text is ever concatenated into the statement.
+// No caller text reaches the statement: values are placeholders, keys travel inside jsonb.
 export function buildWhere(filters: LogFilters, firstIndex = 1): SqlFragment {
   const conditions: string[] = [];
   const values: unknown[] = [];
@@ -68,6 +64,44 @@ export function buildWhere(filters: LogFilters, firstIndex = 1): SqlFragment {
     const arms = variants.map(() => `attributes @> $${index++}::jsonb`);
     conditions.push(`(${arms.join(' OR ')})`);
     values.push(...variants);
+  }
+
+  return { text: conditions.length === 0 ? 'TRUE' : conditions.join(' AND '), values };
+}
+
+const MINUTE_MS = 60_000;
+
+// Safe only when nothing outside the rollup columns is filtered and the range is minute-aligned.
+export function canUseRollup(filters: LogFilters): boolean {
+  if (filters.attributes.length > 0 || filters.q !== undefined) return false;
+  if (filters.sinceMs === undefined || filters.untilMs === undefined) return false;
+  return filters.sinceMs % MINUTE_MS === 0 && filters.untilMs % MINUTE_MS === 0;
+}
+
+export function buildRollupWhere(filters: LogFilters, firstIndex = 1): SqlFragment {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let index = firstIndex;
+  const placeholder = (): string => `$${index++}`;
+
+  if (filters.sinceMs !== undefined) {
+    conditions.push(`bucket >= ${placeholder()}::timestamptz`);
+    values.push(new Date(filters.sinceMs).toISOString());
+  }
+
+  if (filters.untilMs !== undefined) {
+    conditions.push(`bucket < ${placeholder()}::timestamptz`);
+    values.push(new Date(filters.untilMs).toISOString());
+  }
+
+  if (filters.service !== undefined) {
+    conditions.push(`service = ${placeholder()}`);
+    values.push(filters.service);
+  }
+
+  if (filters.level !== undefined) {
+    conditions.push(`level = ${placeholder()}::log_level`);
+    values.push(filters.level);
   }
 
   return { text: conditions.length === 0 ? 'TRUE' : conditions.join(' AND '), values };

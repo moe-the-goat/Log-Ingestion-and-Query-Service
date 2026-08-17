@@ -43,6 +43,7 @@ describe('log queries', () => {
 
   beforeEach(async () => {
     await pool.query('DELETE FROM logs');
+    await pool.query('DELETE FROM log_rollup_1m');
     await logs.insert([
       record(0, 'error', 'checkout', 'payment declined', { region: 'eu-west', retries: 3 }),
       record(1, 'info', 'checkout', 'payment accepted', { region: 'us-east', retries: 0 }),
@@ -184,6 +185,7 @@ describe('log queries', () => {
 
     it('stays deterministic when timestamps tie', async () => {
       await pool.query('DELETE FROM logs');
+      await pool.query('DELETE FROM log_rollup_1m');
       await logs.insert([
         record(0, 'info', 'checkout', 'tied a'),
         record(0, 'info', 'checkout', 'tied b'),

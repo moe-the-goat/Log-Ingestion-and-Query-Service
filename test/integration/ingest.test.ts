@@ -57,6 +57,7 @@ describe('POST /logs', () => {
 
   beforeEach(async () => {
     await pool.query('DELETE FROM logs');
+    await pool.query('DELETE FROM log_rollup_1m');
   });
 
   it('stores a batch and reports how many were accepted', async () => {

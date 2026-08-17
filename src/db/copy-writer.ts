@@ -3,6 +3,7 @@ import { from as copyFrom } from 'pg-copy-streams';
 import type { Pool } from 'pg';
 import type { LogRecord } from '../domain/log.js';
 import { COPY_COLUMNS, encodeBinaryCopy, encodeTextCopy } from './copy-encoder.js';
+import { buildRollupStatements } from './rollup.js';
 import type { LogWriter } from './log-writer.js';
 
 export type CopyFormat = 'binary' | 'text';
@@ -17,8 +18,7 @@ export function createCopyWriter(pool: Pool, format: CopyFormat): LogWriter {
   const encode = format === 'binary' ? encodeBinaryCopy : encodeTextCopy;
 
   return {
-    // The copy runs inside an explicit transaction so a flush is all-or-nothing, and so the
-    // rollup update can later join it without changing the durability story.
+    // An explicit transaction makes a flush all-or-nothing across the copy and the rollup.
     async write(records: readonly LogRecord[]): Promise<void> {
       if (records.length === 0) return;
 
@@ -31,6 +31,12 @@ export function createCopyWriter(pool: Pool, format: CopyFormat): LogWriter {
         const completed = finished(stream);
         stream.end(payload);
         await completed;
+
+        // Same transaction as the rows, so the rollup cannot drift from what it summarises.
+        for (const rollup of buildRollupStatements(records)) {
+          await client.query(rollup.text, rollup.values);
+        }
+
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined);

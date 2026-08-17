@@ -45,6 +45,7 @@ describe.each<WriterKind>(['binary', 'text', 'insert'])('%s writer', (kind) => {
 
   beforeEach(async () => {
     await pool.query('DELETE FROM logs');
+    await pool.query('DELETE FROM log_rollup_1m');
   });
 
   it('round-trips a row unchanged', async () => {
