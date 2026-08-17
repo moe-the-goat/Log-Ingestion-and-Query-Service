@@ -13,8 +13,7 @@ export interface IngestBatch {
 
 export type BatchResult = { ok: true; batch: IngestBatch } | { ok: false; error: string };
 
-// A single bad entry must not sink the batch, so entry failures are collected by index while
-// only a broken envelope rejects the whole request.
+// One bad entry must not sink the batch; only a broken envelope rejects the whole request.
 export function parseIngestBatch(body: Buffer, nowMs: number = Date.now()): BatchResult {
   let parsed: unknown;
   try {

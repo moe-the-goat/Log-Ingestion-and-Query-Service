@@ -8,8 +8,7 @@ export interface Cursor {
   id: string;
 }
 
-// The cursor is opaque to callers but not authenticated: it encodes a position, never a
-// permission, so a tampered one can only ever move the reader within results it already asked for.
+// Opaque but not authenticated: it encodes a position, never a permission.
 export function encodeCursor(cursor: Cursor): string {
   const payload = JSON.stringify({ v: VERSION, t: cursor.timestampMs, i: cursor.id });
   return Buffer.from(payload, 'utf8').toString('base64url');

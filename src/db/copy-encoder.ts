@@ -22,8 +22,7 @@ function writeInt64(target: Buffer, value: number, offset: number): void {
   target.writeUInt32BE(value - high * WORD_SPAN, offset + 4);
 }
 
-// Sizing the buffer up front means one allocation per flush instead of one per row, which is
-// the whole point of taking the copy path over per-row INSERT parameters.
+// Sized up front so a flush costs one allocation rather than one per row.
 export function encodeBinaryCopy(records: readonly LogRecord[]): Buffer {
   const count = records.length;
   const attributeTexts: string[] = new Array<string>(count);
@@ -117,8 +116,7 @@ function escapeCopyText(value: string): string {
   return value.replace(/[\\\t\n\r]/g, (character) => TEXT_ESCAPES[character] ?? character);
 }
 
-// Kept alongside the binary encoder as the fallback path and as the comparison the README
-// quotes: same rows, same transaction, only the wire encoding differs.
+// The fallback path and the benchmark comparison: same rows, only the wire encoding differs.
 export function encodeTextCopy(records: readonly LogRecord[]): Buffer {
   const rows: string[] = new Array<string>(records.length);
 

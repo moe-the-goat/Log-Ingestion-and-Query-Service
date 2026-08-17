@@ -2,8 +2,7 @@ import pg from 'pg';
 import type { Pool } from 'pg';
 import type { DatabaseConfig } from '../config.js';
 
-// Timestamps come back as ISO strings; parsing them into Date objects is pure overhead
-// because every response re-serialises them anyway.
+// Every response re-serialises timestamps anyway, so parsing them into Date is pure overhead.
 pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, (value) => value);
 
 export function createPool(config: DatabaseConfig): Pool {

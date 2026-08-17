@@ -33,9 +33,7 @@ interface Waiter {
   reject: (error: unknown) => void;
 }
 
-// Requests hand their rows over and wait for the flush that carries them, so a 200 is only ever
-// sent for rows Postgres has already committed. Coalescing many small requests into few large
-// copies is what stops throughput depending on the caller's batch size.
+// Requests wait for the flush carrying their rows, so 200 only follows a committed write.
 export function createWriteBuffer(
   writer: LogWriter,
   options: WriteBufferOptions,
@@ -97,8 +95,7 @@ export function createWriteBuffer(
       if (records.length === 0) return;
       if (closed) throw new Error('write buffer is closed');
 
-      // Shedding here is honest backpressure: the caller is told the rows were not taken,
-      // rather than being acknowledged and dropped.
+      // Honest backpressure: the caller is told the rows were not taken, never silently dropped.
       if (pendingBytes + byteCost > options.queueMaxBytes) {
         throw new QueueFullError('ingest queue is full');
       }

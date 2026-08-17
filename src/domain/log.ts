@@ -6,8 +6,7 @@ export type AttributeValue = string | number | boolean;
 
 export type Attributes = Record<string, AttributeValue>;
 
-// Timestamps travel as epoch milliseconds so each writer encodes them once, in the form it
-// needs: the insert path formats ISO text, the copy path converts to Postgres microseconds.
+// Epoch milliseconds so each writer encodes the timestamp once, in the form it needs.
 export interface LogRecord {
   timestampMs: number;
   level: LogLevel;

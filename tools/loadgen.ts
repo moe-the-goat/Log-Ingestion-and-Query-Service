@@ -47,17 +47,14 @@ function readOptions(): Options {
     connections: Number(values.connections),
     batchSize: Number(values.batch),
     warmupSeconds: Number(values.warmup),
-    // Named by the caller: the generator runs outside the container and cannot see which
-    // write path the service was started with, so guessing it would mislabel results.
+    // The generator cannot see which write path the service uses, so guessing would mislabel runs.
     label: values.label ?? 'run',
-    // Backdating entries is legal per the contract and lets a month of history be loaded
-    // through the public API, so no benchmark needs the database port opened up.
+    // Backdating is legal per the contract and loads history without exposing the database port.
     spreadDays: Number(values['spread-days']),
   };
 }
 
-// The entry bodies are built once so the generator spends its time on sockets rather than on
-// JSON.stringify, which would otherwise make the client the bottleneck before the service is.
+// Built once so the generator spends its time on sockets rather than on JSON.stringify.
 function buildFragments(): string[] {
   const fragments: string[] = [];
 
