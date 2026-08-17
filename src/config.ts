@@ -17,6 +17,12 @@ export interface IngestConfig {
   maxConcurrentFlushes: number;
 }
 
+export interface MaintenanceConfig {
+  aheadDays: number;
+  retentionDays: number;
+  intervalMs: number;
+}
+
 export interface Config {
   nodeEnv: 'development' | 'production' | 'test';
   host: string;
@@ -25,6 +31,7 @@ export interface Config {
   maxBodyBytes: number;
   database: DatabaseConfig;
   ingest: IngestConfig;
+  maintenance: MaintenanceConfig;
 }
 
 class ConfigError extends Error {}
@@ -77,6 +84,12 @@ export function loadConfig(env: Env = process.env): Config {
       // Sized against the 256 MB container so a backlog sheds load instead of ending in an OOM.
       queueMaxBytes: int(env, 'INGEST_QUEUE_MAX_BYTES', 64 * 1024 * 1024, 1024, 192 * 1024 * 1024),
       maxConcurrentFlushes: int(env, 'INGEST_MAX_CONCURRENT_FLUSHES', 4, 1, 32),
+    },
+    maintenance: {
+      // Lookahead margin so rows still land in a real partition if a cycle is missed.
+      aheadDays: int(env, 'PARTITION_AHEAD_DAYS', 3, 1, 30),
+      retentionDays: int(env, 'RETENTION_DAYS', 30, 1, 3650),
+      intervalMs: int(env, 'MAINTENANCE_INTERVAL_MS', 60 * 60 * 1000, 1_000, 24 * 60 * 60 * 1000),
     },
   };
 }

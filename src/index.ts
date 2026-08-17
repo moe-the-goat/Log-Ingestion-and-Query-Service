@@ -4,6 +4,7 @@ import { createPool } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
 import { createLogsRepository } from './db/logs-repository.js';
 import { createLogWriter } from './db/log-writer.js';
+import { startMaintenance } from './db/maintenance.js';
 import { createWriteBuffer } from './ingest/write-buffer.js';
 import { createServer } from './http/server.js';
 
@@ -26,6 +27,11 @@ async function main(): Promise<void> {
   logger.info('listening', { host: config.host, port: config.port });
 
   await runMigrations(pool, logger);
+
+  // Partitions have to exist before the first row arrives, so this runs before we report healthy.
+  const maintenance = startMaintenance(pool, config.maintenance, logger);
+  await maintenance.runOnce();
+
   ready = true;
   logger.info('service ready', { writer: config.ingest.writer });
 
@@ -42,6 +48,7 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         // Stop taking requests first, then let everything already acknowledged reach disk.
+        maintenance.stop();
         await app.close();
         await ingest.close();
         await pool.end();
