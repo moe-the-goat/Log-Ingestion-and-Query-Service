@@ -1,6 +1,33 @@
 services:
   postgres:
     image: postgres:17
+    # Tuned for the graded 1 CPU / 1 GB budget. The large max_wal_size and spread checkpoint
+    # keep sustained ingestion from stalling on a checkpoint, and the raised
+    # gin_pending_list_limit lets attribute index updates batch instead of writing per row.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - gin_pending_list_limit=16MB
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_naptime=15s
+      - -c
+      - max_connections=50
     environment:
       POSTGRES_USER: logs
       POSTGRES_PASSWORD: logs
