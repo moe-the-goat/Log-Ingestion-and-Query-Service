@@ -4,9 +4,11 @@ import { idToString, nextId } from '../domain/id.js';
 import type { AggregateQuery, BucketSize, GroupBy, LogQuery } from '../domain/query.js';
 import type { Cursor } from '../domain/cursor.js';
 import { buildRollupWhere, buildWhere, canUseRollup } from './log-filters.js';
+import type { SqlFragment } from './log-filters.js';
 import { buildRollupStatements } from './rollup.js';
 
 const COLUMNS = 6;
+const MINUTE_MS = 60_000;
 
 // A statement is capped at 65535 parameters; six per row leaves plenty of headroom here.
 const MAX_ROWS_PER_STATEMENT = 1000;
@@ -156,30 +158,58 @@ export function createLogsRepository(pool: Pool): LogsRepository {
       };
     },
 
-    // Uses the rollup when it can answer the request, the base table otherwise; counts match.
+    // Whole minutes come from the rollup and only the partial minutes at each edge are counted
+    // from the base table, so an arbitrary range still avoids scanning the rows it covers.
     async aggregate(query: AggregateQuery): Promise<AggregateBucket[]> {
-      const useRollup = canUseRollup(query.filters);
-      const where = useRollup ? buildRollupWhere(query.filters) : buildWhere(query.filters);
-      const values = [...where.values];
-      const intervalIndex = values.length + 1;
-      values.push(BUCKET_INTERVALS[query.bucket]);
+      const filters = query.filters;
+      const since = filters.sinceMs;
+      const until = filters.untilMs;
 
-      const groupExpression =
-        query.groupBy === undefined ? 'NULL::text' : GROUP_EXPRESSIONS[query.groupBy];
+      const interval = BUCKET_INTERVALS[query.bucket];
+      const group = query.groupBy === undefined ? 'NULL::text' : GROUP_EXPRESSIONS[query.groupBy];
+      const values: unknown[] = [interval];
 
-      const source = useRollup
-        ? `SELECT date_bin($${intervalIndex}::interval, bucket, TIMESTAMPTZ '2000-01-01') AS bucket,
-                  ${groupExpression} AS group_value,
-                  sum(count) AS count
-             FROM log_rollup_1m
-            WHERE ${where.text}
-            GROUP BY 1, 2`
-        : `SELECT date_bin($${intervalIndex}::interval, ts, TIMESTAMPTZ '2000-01-01') AS bucket,
-                  ${groupExpression} AS group_value,
-                  count(*) AS count
-             FROM logs
-            WHERE ${where.text}
-            GROUP BY 1, 2`;
+      const fromBase = (source: SqlFragment): string =>
+        `SELECT date_bin($1::interval, ts, TIMESTAMPTZ '2000-01-01') AS bucket,
+                ${group} AS group_value, count(*) AS count
+           FROM logs WHERE ${source.text} GROUP BY 1, 2`;
+
+      let source: string;
+
+      const firstWholeMinute = since === undefined ? 0 : Math.ceil(since / MINUTE_MS) * MINUTE_MS;
+      const lastWholeMinute = until === undefined ? 0 : Math.floor(until / MINUTE_MS) * MINUTE_MS;
+
+      if (!canUseRollup(filters) || firstWholeMinute >= lastWholeMinute) {
+        const where = buildWhere(filters, values.length + 1);
+        values.push(...where.values);
+        source = fromBase(where);
+      } else {
+        const middle = buildRollupWhere(
+          { ...filters, sinceMs: firstWholeMinute, untilMs: lastWholeMinute },
+          values.length + 1,
+        );
+        values.push(...middle.values);
+
+        const head = buildWhere(
+          { ...filters, sinceMs: since, untilMs: firstWholeMinute },
+          values.length + 1,
+        );
+        values.push(...head.values);
+
+        const tail = buildWhere(
+          { ...filters, sinceMs: lastWholeMinute, untilMs: until },
+          values.length + 1,
+        );
+        values.push(...tail.values);
+
+        source = `SELECT bucket, group_value, sum(count) AS count FROM (
+                    SELECT date_bin($1::interval, bucket, TIMESTAMPTZ '2000-01-01') AS bucket,
+                           ${group} AS group_value, count
+                      FROM log_rollup_1m WHERE ${middle.text}
+                    UNION ALL ${fromBase(head)}
+                    UNION ALL ${fromBase(tail)}
+                  ) parts GROUP BY 1, 2`;
+      }
 
       const result = await pool.query<{ start: string; group: string | null; count: string }>(
         `SELECT to_char(bucket AT TIME ZONE 'UTC', ${BUCKET_FORMAT}) AS start,

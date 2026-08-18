@@ -69,13 +69,11 @@ export function buildWhere(filters: LogFilters, firstIndex = 1): SqlFragment {
   return { text: conditions.length === 0 ? 'TRUE' : conditions.join(' AND '), values };
 }
 
-const MINUTE_MS = 60_000;
-
-// Safe only when nothing outside the rollup columns is filtered and the range is minute-aligned.
+// The rollup stores only per-minute counts by service and level, so anything filtering on a
+// column it does not hold has to read the base table.
 export function canUseRollup(filters: LogFilters): boolean {
   if (filters.attributes.length > 0 || filters.q !== undefined) return false;
-  if (filters.sinceMs === undefined || filters.untilMs === undefined) return false;
-  return filters.sinceMs % MINUTE_MS === 0 && filters.untilMs % MINUTE_MS === 0;
+  return filters.sinceMs !== undefined && filters.untilMs !== undefined;
 }
 
 export function buildRollupWhere(filters: LogFilters, firstIndex = 1): SqlFragment {

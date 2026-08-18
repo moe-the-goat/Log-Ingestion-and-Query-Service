@@ -137,20 +137,30 @@ describe('rollup agrees with the base table', () => {
     expect(buckets[0]?.count).toBe(60);
   });
 
-  it('falls back when the range does not start on a minute', async () => {
+  // The rollup only holds whole minutes, so a range with partial minutes at either end must
+  // still come back exact.
+  it.each<[string, number, number]>([
+    ['start mid-minute', 30_000, 180 * MINUTE],
+    ['end mid-minute', 0, 180 * MINUTE + 17_000],
+    ['both ends mid-minute', 21_000, 90 * MINUTE + 43_000],
+    ['inside a single minute', 10_000, 50_000],
+  ])('counts a range with a %s exactly', async (_name, fromOffset, toOffset) => {
     const writer = await createLogWriter(pool, 'binary');
-    await writer.write(sample(60));
+    await writer.write(sample(600));
 
-    const offset = await logs.aggregate({
-      filters: filters({ sinceMs: BASE + 30_000, untilMs: BASE + 180 * MINUTE }),
+    const buckets = await logs.aggregate({
+      filters: filters({ sinceMs: BASE + fromOffset, untilMs: BASE + toOffset }),
       bucket: '1d',
     });
     const exact = await pool.query<{ count: string }>(
-      'SELECT count(*)::text AS count FROM logs WHERE ts >= $1::timestamptz',
-      [new Date(BASE + 30_000).toISOString()],
+      `SELECT count(*)::text AS count FROM logs
+        WHERE ts >= $1::timestamptz AND ts < $2::timestamptz`,
+      [new Date(BASE + fromOffset).toISOString(), new Date(BASE + toOffset).toISOString()],
     );
 
-    expect(offset[0]?.count).toBe(Number(exact.rows[0]?.count));
+    const total = buckets.reduce((sum, row) => sum + row.count, 0);
+    expect(total).toBe(Number(exact.rows[0]?.count));
+    expect(total).toBeGreaterThan(0);
   });
 
   it('filters the rollup by service and level', async () => {

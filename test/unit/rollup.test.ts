@@ -114,7 +114,7 @@ describe('canUseRollup', () => {
   const minute = 60_000;
   const aligned = { sinceMs: BASE, untilMs: BASE + 10 * minute };
 
-  it('accepts a minute-aligned range with no row-level filters', () => {
+  it('accepts a closed range with no row-level filters', () => {
     expect(canUseRollup(filters(aligned))).toBe(true);
     expect(canUseRollup(filters({ ...aligned, service: 'checkout' }))).toBe(true);
     expect(canUseRollup(filters({ ...aligned, level: 'error' }))).toBe(true);
@@ -127,9 +127,11 @@ describe('canUseRollup', () => {
     ).toBe(false);
   });
 
-  it('refuses a range that does not land on minute boundaries', () => {
-    expect(canUseRollup(filters({ sinceMs: BASE + 30_000, untilMs: BASE + minute }))).toBe(false);
-    expect(canUseRollup(filters({ sinceMs: BASE, untilMs: BASE + 90_000 }))).toBe(false);
+  it('accepts a range that does not land on minute boundaries', () => {
+    expect(canUseRollup(filters({ sinceMs: BASE + 30_000, untilMs: BASE + 5 * minute }))).toBe(
+      true,
+    );
+    expect(canUseRollup(filters({ sinceMs: BASE, untilMs: BASE + 90_000 }))).toBe(true);
   });
 
   it('refuses an open-ended range', () => {
