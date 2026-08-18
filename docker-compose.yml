@@ -1,9 +1,9 @@
 services:
   postgres:
     image: postgres:17
-    # Tuned for the graded 1 CPU / 1 GB budget. The large max_wal_size and spread checkpoint
-    # keep sustained ingestion from stalling on a checkpoint, and the raised
-    # gin_pending_list_limit lets attribute index updates batch instead of writing per row.
+    # Tuned for the graded 1 CPU / 1 GB budget, where CPU is the binding constraint. The large
+    # max_wal_size and spread checkpoint keep sustained ingestion off a checkpoint stall, and
+    # wal_compression stays off because it trades CPU for I/O in the wrong direction here.
     command:
       - postgres
       - -c
@@ -18,10 +18,6 @@ services:
       - checkpoint_timeout=15min
       - -c
       - checkpoint_completion_target=0.9
-      - -c
-      - wal_compression=on
-      - -c
-      - gin_pending_list_limit=16MB
       - -c
       - autovacuum_vacuum_scale_factor=0.05
       - -c
