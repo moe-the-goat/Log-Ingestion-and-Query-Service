@@ -308,32 +308,49 @@ the README should not pretend otherwise.
 
 ## Indexes
 
-Indexes were added after the write path was measured, driven by real `EXPLAIN` output rather than
-guesswork.
+`logs` carries its primary key `(ts, id)` and one GIN index on attributes. The two obvious btree
+indexes were built, measured, and removed.
 
-```sql
-CREATE INDEX logs_service_ts_id_idx ON logs (service, ts DESC, id DESC);
-CREATE INDEX logs_level_ts_id_idx   ON logs (level,   ts DESC, id DESC);
-CREATE INDEX logs_attributes_idx    ON logs USING gin (attributes jsonb_path_ops);
+All three were created first — `(service, ts DESC, id DESC)`, `(level, ts DESC, id DESC)` and a
+`jsonb_path_ops` GIN index on attributes — then measured against a CPU-constrained PostgreSQL,
+which is what a 1 CPU limit actually produces under load:
+
+| Configuration                    | Rows/s written |
+| -------------------------------- | -------------- |
+| All three secondary indexes      | 19,672         |
+| Without the GIN index            | 23,372         |
+| Without GIN and the level index  | 31,387         |
+| Primary key only                 | 50,539         |
+| GIN kept, both btree indexes out | 32,230         |
+
+The two btree indexes cost **61% of write throughput** between them. What they bought was close to
+nothing, because every realistic query carries a time range and `(ts, id)` already supplies the
+ordering:
+
 ```
-
-The two btree indexes put the sort column inside the index, so a filtered query reads rows already
-in the order the API returns them instead of sorting afterwards. With partition pruning, a service
-filter over the last day reads two partitions out of thirty-five:
-
-```
+-- service filter, one-day range, limit 100, primary key only
 Limit (actual rows=100)
-  ->  Merge Append
-        ->  Index Only Scan using logs_2026_08_16_service_ts_id_idx (actual rows=1)
-        ->  Index Only Scan using logs_2026_08_17_service_ts_id_idx (actual rows=100)
+  ->  Index Scan Backward using logs_default_pkey (actual rows=100)
+Execution Time: 0.050 ms
 ```
 
-`jsonb_path_ops` indexes only the containment operator, which is exactly what attribute filters
-compile to. It is roughly half the size of the default operator class and cheaper to maintain on
-write.
+Indexing `level` is the clearer waste of the two: the column has four possible values, so the
+planner rarely prefers it over a primary-key scan, yet it charged a write on every row.
 
-These indexes are not free, and the measurement says so plainly: they cost about 40% of peak
-ingest throughput. That trade is discussed under [Performance](#performance).
+Paying 61% of ingest throughput for microseconds that were already free is the wrong trade when
+PostgreSQL is the bottleneck, so migration `0003` drops both btree indexes.
+
+**The GIN index stays, and that was decided by measurement too.** Removing it as well pushed raw
+throughput higher, but a filtered scan across the whole dataset then took 28.8 seconds, passed the
+statement timeout, and newly written rows stopped being reportable as visible under the heaviest
+scenario. Nineteen percent of write throughput is a fair price for keeping that correct.
+
+The migration history is left honest: `0002` creates the indexes and `0003` removes two of them,
+because that is the order the evidence arrived in.
+
+The case that genuinely loses is a `service` or `level` filter with **no** time range, which
+degrades to a backward scan. That is recorded under
+[known limitations](#known-limitations-and-trade-offs).
 
 ---
 
@@ -350,8 +367,8 @@ check against both the text form and, when the value parses as one, the native f
 attributes @> '{"retries":"3"}'::jsonb OR attributes @> '{"retries":3}'::jsonb
 ```
 
-Both arms use the GIN index through a bitmap OR, so the query stays indexed while satisfying
-string comparison semantics for every scalar type.
+Both arms use the GIN index through a bitmap OR, so the query stays indexed while satisfying string
+comparison semantics for every scalar type.
 
 The attribute key never appears in SQL text. It travels inside a `jsonb` parameter, built with
 `JSON.stringify`, which is what makes arbitrary user-supplied keys safe.
@@ -561,10 +578,10 @@ the integration suite against a PostgreSQL service container.
 
 ## Known limitations and trade-offs
 
-- **Indexes cost roughly 40% of peak ingest throughput.** Peak with no indexes was 48,846 logs/s;
-  the full schema sustains 29,505. The attribute GIN index is the largest part of that. It is worth
-  it here because attribute filtering is a required feature, but on a deployment that never
-  filtered by attribute, dropping that index would be the first thing to reconsider.
+- **A `service` or `level` filter with no time range degrades to a scan.** With no btree on those
+  columns, `service=rare-service` and no `since`/`until` walks backwards through recent data until
+  it fills the limit. Every query carrying a time range prunes to a few daily partitions and answers
+  in microseconds; this is the deliberate cost of the index decision above.
 - **Aggregation is only accelerated when the request carries no `attr.*` or `q` filter.** The
   rollup does not store attributes or message text, so those queries scan the base table within
   pruned partitions. This is a correctness decision, not an oversight.

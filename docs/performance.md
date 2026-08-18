@@ -190,19 +190,18 @@ npx @foothill/logs-benchmark --compose ./docker-compose.yml --full --seed 612202
 | Category    | Score                                                    |
 | ----------- | -------------------------------------------------------- |
 | Correctness | 15.0 / 15 (15/15 checks)                                 |
-| Performance | 47.5 / 50 (throughput 14,981/s, errors 0.0%, p95 319 ms) |
-| Queries     | 13.1 / 15 (aggregate p95 107 ms, consistency 4/4)        |
+| Performance | 49.4 / 50 (throughput 14,999/s, errors 0.0%, p95 155 ms) |
+| Queries     | 13.6 / 15 (aggregate p95 79 ms, consistency 4/4)         |
 | Reliability | 20.0 / 20 (4/4 scenarios)                                |
-| **Total**   | **95.6 / 100**                                           |
+| **Total**   | **98.0 / 100**                                           |
 
-| Scenario   | Offered  | Achieved | Ingest p95 | Aggregate p95 | Errors |
-| ---------- | -------- | -------- | ---------- | ------------- | ------ |
-| load       | 15,000/s | 14,981/s | 319 ms     | 107 ms        | 0%     |
-| stress     | 24,000/s | 17,543/s | 1157 ms    | 425 ms        | 0%     |
-| spike      | 9,750/s  | 12,935/s | 452 ms     | 517 ms        | 0%     |
-| breakpoint | 28,125/s | 15,792/s | 1689 ms    | 3322 ms       | 0%     |
-
-Zero errors in every scenario, and every accepted record was queryable in every scenario.
+| Scenario                                                                                  | Offered  | Achieved | Ingest p95 | Aggregate p95 | Errors |
+| ----------------------------------------------------------------------------------------- | -------- | -------- | ---------- | ------------- | ------ |
+| load                                                                                      | 15,000/s | 14,999/s | 155 ms     | 79 ms         | 0%     |
+| stress                                                                                    | 24,000/s | 20,405/s | 394 ms     | 391 ms        | 0%     |
+| spike                                                                                     | 9,750/s  | 14,454/s | 236 ms     | 220 ms        | 0%     |
+| breakpoint                                                                                | 28,125/s | 20,321/s | 664 ms     | 3100 ms       | 0%     |
+| Zero errors in every scenario, and every accepted record was queryable in every scenario. |
 
 ### What one measurement was worth
 
@@ -228,6 +227,70 @@ base table keeps the answer exact and makes the fast path apply to essentially e
 Throughput improved because of a query change. Aggregations were consuming the single Postgres CPU
 that writes also depend on; removing that scan gave the capacity back to ingestion. Stress
 throughput nearly doubled and breakpoint quadrupled without the write path changing at all.
+
+## What the secondary indexes actually cost
+
+A platform submission scored 18.56/50 on performance while reporting **PostgreSQL CPU at 101.83%
+peak and 78.11% average, against an application using 7.63%**. The database was the bottleneck and
+the service was idle waiting on it. That is invisible on a fast development machine, where the same
+build is limited by the load generator instead.
+
+To measure the write path without the HTTP layer in the way, rows were written straight through
+`COPY` into a PostgreSQL container capped at 0.15 CPU — low enough that the database, not the
+client, is the constraint:
+
+| Configuration                           | Rows/s     | Gain      |
+| --------------------------------------- | ---------- | --------- |
+| All three secondary indexes             | 19,672     | —         |
+| Without the GIN index                   | 23,372     | +19%      |
+| Without GIN and the level index         | 31,387     | +60%      |
+| Primary key only                        | 50,539     | +157%     |
+| Primary key only, `wal_compression` off | **55,535** | **+182%** |
+
+The three secondary indexes cost 64% of write throughput. `wal_compression` costs another 10%: it
+trades CPU for I/O, which is the wrong direction when CPU is what has run out.
+
+What the indexes bought, measured on 600,000 rows spanning 30 days with none of them present:
+
+```
+-- service filter, one-day range, limit 100
+Limit (actual rows=100)
+  ->  Index Scan Backward using logs_default_pkey (actual rows=100)
+Execution Time: 0.050 ms
+
+-- attribute containment, one-day range, no GIN index
+Execution Time: 4.484 ms
+```
+
+Both are effectively free. Every realistic query carries a time range, the range prunes to a few
+daily partitions, and the `(ts, id)` primary key already returns rows in the order the API wants,
+so `LIMIT` stops the scan early. The secondary indexes were paying 64% of ingest throughput to
+speed up queries that were already finishing in microseconds.
+
+### Where the line was drawn
+
+Dropping all three was tried, and it went too far. Raw throughput was the best of any
+configuration, but a filtered scan across the whole dataset then took 28.8 seconds, passed the
+30 second statement timeout, and the heaviest scenario reported nothing as visible:
+
+| Configuration                 | Total | Performance | Queries   | Consistency |
+| ----------------------------- | ----- | ----------- | --------- | ----------- |
+| All three indexes             | 95.6  | 47.5 / 50   | 13.1 / 15 | 4/4         |
+| No secondary indexes          | 95.8  | 50.0 / 50   | 10.8 / 15 | 3/4         |
+| GIN kept, both btrees dropped | 98.0  | 49.4 / 50   | 13.6 / 15 | 4/4         |
+
+Throughput is not worth a correctness property. Migration `0003` drops the two btree indexes and
+keeps the GIN index, and `wal_compression` is switched off: 32,230 rows/s against the original
+19,672, so 64% more write throughput with attribute queries still indexed.
+
+Indexing `level` is the clearer waste of the two. Four possible values means the planner rarely
+prefers it over a primary-key scan, yet it charged a write on every row.
+
+The migration history keeps `0002` creating the indexes and `0003` removing two of them, because
+that is the order the evidence arrived in.
+
+The one query shape that genuinely loses is a `service` or `level` filter with no time range at
+all, which becomes a backward scan.
 
 ## What is not yet measured
 
