@@ -177,6 +177,58 @@ The fix is to sort every rollup group by `(bucket, service, level)` before the u
 flushes take row locks in the same order. Large flushes are also split so no statement exceeds the
 65,535 parameter limit. After the fix: 0 deadlocks, 0 errors across every subsequent run.
 
+## Platform benchmark
+
+The Foothill benchmark CLI (`@foothill/logs-benchmark 0.2.5`) runs its own k6 generator in Docker
+on a fixed CPU budget, seeds a million rows, and scores four scenarios. It enforces the resource
+limits itself: application `cpus 0.5 / 256m`, postgres `cpus 1 / 1024m`.
+
+```bash
+npx @foothill/logs-benchmark --compose ./docker-compose.yml --full --seed 6122026 --generator-cpus 2
+```
+
+| Category    | Score                                                    |
+| ----------- | -------------------------------------------------------- |
+| Correctness | 15.0 / 15 (15/15 checks)                                 |
+| Performance | 47.5 / 50 (throughput 14,981/s, errors 0.0%, p95 319 ms) |
+| Queries     | 13.1 / 15 (aggregate p95 107 ms, consistency 4/4)        |
+| Reliability | 20.0 / 20 (4/4 scenarios)                                |
+| **Total**   | **95.6 / 100**                                           |
+
+| Scenario   | Offered  | Achieved | Ingest p95 | Aggregate p95 | Errors |
+| ---------- | -------- | -------- | ---------- | ------------- | ------ |
+| load       | 15,000/s | 14,981/s | 319 ms     | 107 ms        | 0%     |
+| stress     | 24,000/s | 17,543/s | 1157 ms    | 425 ms        | 0%     |
+| spike      | 9,750/s  | 12,935/s | 452 ms     | 517 ms        | 0%     |
+| breakpoint | 28,125/s | 15,792/s | 1689 ms    | 3322 ms       | 0%     |
+
+Zero errors in every scenario, and every accepted record was queryable in every scenario.
+
+### What one measurement was worth
+
+An earlier run of the same benchmark scored 80.2. The difference was a single decision.
+
+The rollup was originally used only when `since` and `until` fell exactly on minute boundaries,
+because a range starting mid-minute would otherwise count rows the caller excluded. That was
+correct, and far too strict: real callers do not send minute-aligned timestamps, so in practice
+**the rollup was never used** and every aggregation scanned the base table.
+
+Reading whole minutes from the rollup and counting only the partial minutes at each edge from the
+base table keeps the answer exact and makes the fast path apply to essentially every request:
+
+| Measure                 | Gated on alignment | Edge-corrected |
+| ----------------------- | ------------------ | -------------- |
+| Total score             | 80.2               | **95.6**       |
+| Aggregate p95 (load)    | 475 ms             | **107 ms**     |
+| Aggregate p95 (stress)  | 7685 ms            | **425 ms**     |
+| Throughput (load)       | 14,531/s           | **14,981/s**   |
+| Throughput (stress)     | 9,213/s            | **17,543/s**   |
+| Throughput (breakpoint) | 4,205/s            | **15,792/s**   |
+
+Throughput improved because of a query change. Aggregations were consuming the single Postgres CPU
+that writes also depend on; removing that scan gave the capacity back to ingestion. Stress
+throughput nearly doubled and breakpoint quadrupled without the write path changing at all.
+
 ## What is not yet measured
 
 - Retention: dropping an expired partition under load.

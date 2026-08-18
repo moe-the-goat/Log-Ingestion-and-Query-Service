@@ -364,15 +364,23 @@ The attribute key never appears in SQL text. It travels inside a `jsonb` paramet
 same transaction as the rows it summarises**. It therefore cannot drift from the base table: either
 both are committed or neither is.
 
-`GET /logs/aggregate` routes to the rollup only when the rollup can answer the request exactly:
+`GET /logs/aggregate` uses the rollup whenever the request filters only on columns the rollup
+holds — that is, no `attr.*` and no `q`.
 
-- no `attr.*` filter and no `q` filter, since the rollup stores neither, and
-- `since` and `until` both land on minute boundaries.
+Time ranges do not have to be minute-aligned. A range starting at 14:30:30 overlaps the 14:30
+bucket, which also counts rows from 14:30:00 to 14:30:29 that the caller excluded, so the service
+reads the whole minutes from the rollup and counts only the partial minute at each edge from the
+base table. The answer stays exact and the scan stays small.
 
-That second condition matters. A range starting at 14:30:30 overlaps the 14:30 bucket, which also
-counts rows from 14:30:00 to 14:30:29 that the caller excluded. Rather than return a subtly wrong
-number, the service falls back to the base table. Both paths are verified to return identical
-results across every bucket size, grouping and write path.
+This was originally implemented as a strict alignment check, which fell back to the base table for
+any range that was not minute-aligned. It was correct but far too conservative: real callers do
+not send aligned timestamps, so the rollup was almost never used. Relaxing it while keeping the
+result exact was worth more than any other single change in the project — see
+[`docs/performance.md`](docs/performance.md).
+
+Both paths are verified to return identical results across every bucket size, grouping and write
+path, including ranges that start mid-minute, end mid-minute, do both, or fall entirely inside a
+single minute.
 
 Every supported bucket — 1m, 5m, 1h, 1d — is a whole number of minutes, so all four roll up from
 this single table.
@@ -404,7 +412,25 @@ knowing:
 ## Performance
 
 Full methodology, every run, and the query plans are in [`docs/performance.md`](docs/performance.md).
-Summary, all measured inside the graded limits with the load generator outside the containers:
+
+### Platform benchmark
+
+Scored with the Foothill benchmark CLI, which enforces the resource limits itself and runs its own
+k6 generator on a fixed CPU budget:
+
+| Category    | Score                                              |
+| ----------- | -------------------------------------------------- |
+| Correctness | 15.0 / 15                                          |
+| Performance | 47.5 / 50 — 14,981 logs/s, 0.0% errors, p95 319 ms |
+| Queries     | 13.1 / 15 — aggregate p95 107 ms, consistency 4/4  |
+| Reliability | 20.0 / 20 — 4/4 scenarios                          |
+| **Total**   | **95.6 / 100**                                     |
+
+Zero errors across load, stress, spike and breakpoint, and every accepted record was queryable in
+every scenario.
+
+The remaining measurements below were taken with the project's own load generator, which allows
+the write paths to be compared directly against each other:
 
 ### Write path comparison
 
@@ -539,9 +565,9 @@ the integration suite against a PostgreSQL service container.
   the full schema sustains 29,505. The attribute GIN index is the largest part of that. It is worth
   it here because attribute filtering is a required feature, but on a deployment that never
   filtered by attribute, dropping that index would be the first thing to reconsider.
-- **Aggregation is only accelerated when the range is minute-aligned** and carries no `attr.*` or
-  `q` filter. Anything else falls back to scanning the base table within pruned partitions. This is
-  a correctness decision, not an oversight.
+- **Aggregation is only accelerated when the request carries no `attr.*` or `q` filter.** The
+  rollup does not store attributes or message text, so those queries scan the base table within
+  pruned partitions. This is a correctness decision, not an oversight.
 - **The pagination cursor is opaque but not authenticated.** It encodes a position, never a
   permission, so tampering can only move a reader within results they already requested. Signing it
   would add cost for no security benefit given the service is unauthenticated by design.
